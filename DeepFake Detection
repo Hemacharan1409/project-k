@@ -1,0 +1,166 @@
+!pip install numpy
+!pip opencv-python
+!pip install torch
+!pip install torchvision
+!pip install matplotlib
+!pip install pillow
+!pip install streamlit
+!pip install shap
+!pip install lime
+!pip install scikit-image
+!pip install scikit-learn
+!pip install pyngrok
+
+import numpy as np
+import cv2
+import torch
+import torch.nn as nn
+import torchvision.transforms as transforms
+import torchvision.models as models
+from torch.utils.data import DataLoader, Dataset, random_split
+import matplotlib.pyplot as plt
+from torchvision import datasets
+from PIL import Image
+import streamlit as st
+import shap
+import lime
+from lime import lime_image
+from skimage.segmentation import mark_boundaries
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+import os
+from google.colab import drive
+from pyngrok import ngrok
+
+# Mount Google Drive
+drive.mount('/content/drive')
+
+dataset_path = "/content/drive/MyDrive/Datasets/deepfake_images/"
+
+# Verify dataset path
+if not os.path.exists(dataset_path):
+    raise FileNotFoundError(f"Dataset path '{dataset_path}' not found. Please check the path in Google Drive.")
+
+# Load image and video dataset for training
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor()
+])
+
+dataset = datasets.ImageFolder(root=dataset_path, transform=transform)
+
+train_size = int(0.8 * len(dataset))
+test_size = len(dataset) - train_size
+train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
+
+dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+# Define CNN Model for Deepfake Detection
+class DeepfakeCNN(nn.Module):
+    def __init__(self):
+        super(DeepfakeCNN, self).__init__()
+        self.feature_extractor = models.resnet50(pretrained=True)
+        self.feature_extractor.fc = nn.Linear(2048, 2)  # Binary Classification (Real/Fake)
+    
+    def forward(self, x):
+        return self.feature_extractor(x)
+
+# Load pre-trained model
+model = DeepfakeCNN()
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+model.eval()
+
+def evaluate_model():
+    y_true, y_pred = [], []
+    with torch.no_grad():
+        for images, labels in test_dataloader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            predictions = torch.argmax(outputs, dim=1).cpu().numpy()
+            y_pred.extend(predictions)
+            y_true.extend(labels.cpu().numpy())
+    
+    accuracy = accuracy_score(y_true, y_pred)
+    precision = precision_score(y_true, y_pred, average='weighted')
+    recall = recall_score(y_true, y_pred, average='weighted')
+    f1 = f1_score(y_true, y_pred, average='weighted')
+    
+    return accuracy, precision, recall, f1
+
+accuracy, precision, recall, f1 = evaluate_model()
+print(f"Accuracy: {accuracy:.2f}")
+print(f"Precision: {precision:.2f}")
+print(f"Recall: {recall:.2f}")
+print(f"F1-Score: {f1:.2f}")
+
+# Save Streamlit app to a file
+with open("app.py", "w") as f:
+    f.write("""
+import streamlit as st
+import cv2
+import numpy as np
+from PIL import Image
+import torch
+from torchvision import transforms
+
+st.set_page_config(page_title="Deepfake Detection", page_icon="🎭")
+st.title("Deepfake Video Detection with Explainability")
+st.subheader("Upload a video to detect deepfakes")
+
+uploaded_file = st.file_uploader("Upload a video", type=["mp4", "avi", "mov"])
+
+def preprocess_frame(frame):
+    image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    image_tensor = transform(Image.fromarray(image)).unsqueeze(0).to(device)
+    return image_tensor
+
+def detect_deepfake_video(video_path, frame_skip=5):
+    cap = cv2.VideoCapture(video_path)
+    confidence_scores = []
+    frame_count = 0
+    
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        if frame_count % frame_skip == 0:
+            image_tensor = preprocess_frame(frame)
+            with torch.no_grad():
+                output = model(image_tensor)
+                probabilities = torch.nn.functional.softmax(output, dim=1)
+                confidence_scores.append(probabilities.cpu().numpy())
+        
+        frame_count += 1
+    
+    cap.release()
+    if confidence_scores:
+        avg_confidence = np.mean(confidence_scores, axis=0)
+        label = "Deepfake" if np.argmax(avg_confidence) == 1 else "Real"
+    else:
+        avg_confidence = [0.5, 0.5]  # Default neutral confidence
+        label = "Unknown"
+    return label, avg_confidence
+
+if uploaded_file is not None:
+    video_filename = "uploaded_video.mp4"
+    with open(video_filename, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    
+    result, confidence = detect_deepfake_video(video_filename)
+    
+    st.subheader("Detection Result")
+    st.write(f"**{result}** with confidence: {confidence}")
+    os.remove(video_filename)
+""")
+
+# Install required packages
+!pip install streamlit pyngrok
+
+# Start ngrok tunnel
+public_url = ngrok.connect(port=8501)
+print(f"Streamlit is running at: {public_url}")
+
+# Run Streamlit
+!streamlit run app.py &
